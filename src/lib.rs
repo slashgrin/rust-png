@@ -11,17 +11,19 @@
 #![crate_type = "rlib"]
 
 #![allow(unused_features)]
-#![feature(collections, core, io, libc, path, test)]
+#![feature(collections, core, io, libc, path, test, convert)]
 
 extern crate libc;
 
 use libc::{c_int, size_t};
 use std::mem;
-use std::old_io as io;
-use std::old_io::File;
+use std::io;
+use std::io::{Read, Write};
+use std::fs::File;
 use std::iter::repeat;
 use std::ptr;
 use std::slice;
+use std::path;
 
 pub mod ffi;
 
@@ -58,22 +60,23 @@ pub extern fn read_data(png_ptr: *mut ffi::png_struct, data: *mut u8, length: si
         let io_ptr = ffi::RUST_png_get_io_ptr(png_ptr);
         let image_data: &mut ImageData = mem::transmute(io_ptr);
         let len = length as usize;
-        let buf = slice::from_raw_mut_buf(&data, len);
+        let buf = slice::from_raw_parts_mut(data, len);
         let end_pos = std::cmp::min(image_data.data.len()-image_data.offset, len);
         let src = &image_data.data[image_data.offset..image_data.offset+end_pos];
-        ptr::copy_memory(buf.as_mut_ptr(), src.as_ptr(), src.len());
+        ptr::copy(src.as_ptr(), buf.as_mut_ptr(), src.len());
         image_data.offset += end_pos;
     }
 }
 
-pub fn load_png(path: &Path) -> Result<Image,String> {
-    let mut reader = match File::open_mode(path, io::Open, io::Read) {
+pub fn load_png(path: &path::Path) -> Result<Image,String> {
+    let mut reader = match File::open(path) {
         Ok(r) => r,
-        Err(e) => return Err(format!("could not open file: {}", e.desc)),
+        Err(e) => return Err(format!("could not open file: {}", e)),
     };
-    let buf = match reader.read_to_end() {
+    let mut buf = Vec::new();
+    match reader.read_to_end(&mut buf) {
         Ok(b) => b,
-        Err(e) => return Err(format!("could not read file: {}", e.desc))
+        Err(e) => return Err(format!("could not read file: {}", e))
     };
     load_png_from_memory(buf.as_slice())
 }
@@ -143,9 +146,9 @@ pub fn load_png_from_memory(image: &[u8]) -> Result<Image,String> {
         let (color_type, pixel_width) = match (updated_color_type as c_int, updated_bit_depth) {
             (ffi::COLOR_TYPE_RGB, 8) |
             (ffi::COLOR_TYPE_RGBA, 8) |
-            (ffi::COLOR_TYPE_PALETTE, 8) => (PixelsByColorType::RGBA8 as fn(Vec<u8>) -> PixelsByColorType, 4us),
-            (ffi::COLOR_TYPE_GRAY, 8) => (PixelsByColorType::K8 as fn(Vec<u8>) -> PixelsByColorType, 1us),
-            (ffi::COLOR_TYPE_GA, 8) => (PixelsByColorType::KA8 as fn(Vec<u8>) -> PixelsByColorType, 2us),
+            (ffi::COLOR_TYPE_PALETTE, 8) => (PixelsByColorType::RGBA8 as fn(Vec<u8>) -> PixelsByColorType, 4usize),
+            (ffi::COLOR_TYPE_GRAY, 8) => (PixelsByColorType::K8 as fn(Vec<u8>) -> PixelsByColorType, 1usize),
+            (ffi::COLOR_TYPE_GA, 8) => (PixelsByColorType::KA8 as fn(Vec<u8>) -> PixelsByColorType, 2usize),
             _ => panic!("color type not supported"),
         };
 
@@ -170,11 +173,11 @@ pub fn load_png_from_memory(image: &[u8]) -> Result<Image,String> {
 pub extern fn write_data(png_ptr: *mut ffi::png_struct, data: *mut u8, length: size_t) {
     unsafe {
         let io_ptr = ffi::RUST_png_get_io_ptr(png_ptr);
-        let writer: &mut &mut io::Writer = mem::transmute(io_ptr);
+        let writer: &mut &mut io::Write = mem::transmute(io_ptr);
         let data = data as *const _;
-        let buf = slice::from_raw_buf(&data, length as usize);
+        let buf = slice::from_raw_parts(data, length as usize);
         match writer.write_all(buf) {
-            Err(e) => panic!("{}", e.desc),
+            Err(e) => panic!("{}", e),
             _ => {}
         }
     }
@@ -183,21 +186,21 @@ pub extern fn write_data(png_ptr: *mut ffi::png_struct, data: *mut u8, length: s
 pub extern fn flush_data(png_ptr: *mut ffi::png_struct) {
     unsafe {
         let io_ptr = ffi::RUST_png_get_io_ptr(png_ptr);
-        let writer: &mut &mut io::Writer = mem::transmute(io_ptr);
+        let writer: &mut &mut io::Write = mem::transmute(io_ptr);
         match writer.flush() {
-            Err(e) => panic!("{}", e.desc),
+            Err(e) => panic!("{}", e),
             _ => {}
         }
     }
 }
 
-pub fn store_png(img: &mut Image, path: &Path) -> Result<(),String> {
+pub fn store_png(img: &mut Image, path: &path::Path) -> Result<(),String> {
     let mut file = match File::create(path) {
         Ok(f) => f,
         Err(e) => return Err(format!("{}", e))
     };
 
-    let mut writer = &mut file as &mut io::Writer;
+    let mut writer = &mut file as &mut io::Write;
 
     // Box it again because a &Trait is too big to fit in a void*.
     let writer = &mut writer;
@@ -250,9 +253,10 @@ mod test {
     extern crate test;
     use self::test::bench;
     use self::test::fmt_bench_samples;
-    use std::old_io as io;
-    use std::old_io::File;
     use std::iter::repeat;
+    use std::path;
+    use std::fs::File;
+    use std::io::Read;
 
     use super::{ffi, load_png, load_png_from_memory, store_png, Image};
     use super::PixelsByColorType::{RGB8, RGBA8, K8, KA8};
@@ -260,13 +264,13 @@ mod test {
     #[test]
     fn test_valid_png() {
         let file = "test/servo-screenshot.png";
-        let mut reader = match File::open_mode(&Path::new(file), io::Open, io::Read) {
+        let mut reader = match File::open(&path::Path::new(file)) {
             Ok(r) => r,
-            Err(e) => panic!(e.desc),
+            Err(e) => panic!(e),
         };
 
-        let mut buf: Vec<u8> = repeat(0u8).take(1024).collect();
-        let count = reader.read(&mut buf[0..1024]).unwrap();
+        let mut buf: Vec<u8> = Vec::with_capacity(1024);
+        let count = reader.read_to_end(&mut buf).unwrap();
         assert!(count >= 8);
         unsafe {
             let res = ffi::RUST_png_sig_cmp(buf.as_ptr(), 0, 8);
@@ -275,7 +279,7 @@ mod test {
     }
 
     fn load_rgba8(file: &'static str, w: u32, h: u32) {
-        match load_png(&Path::new(file)) {
+        match load_png(&path::Path::new(file)) {
             Err(m) => panic!(m),
             Ok(image) => {
                 assert_eq!(image.width, w);
@@ -303,11 +307,12 @@ mod test {
     }
 
     fn bench_file_from_memory(file: &'static str, w: u32, h: u32, c: &'static str) {
-        let mut reader = match File::open_mode(&Path::new(file), io::Open, io::Read) {
+        let mut reader = match File::open(&path::Path::new(file)) {
             Ok(r) => r,
-            Err(e) => panic!("could not open '{}': {}", file, e.desc)
+            Err(e) => panic!("could not open '{}': {}", file, e)
         };
-        let buf = match reader.read_to_end() {
+        let mut buf = Vec::<u8>::new();
+        match reader.read_to_end(&mut buf) {
             Ok(b) => b,
             Err(e) => panic!(e)
         };
@@ -344,7 +349,7 @@ mod test {
             height: 10,
             pixels: RGB8(repeat(100).take(10 * 10 * 3).collect()),
         };
-        let res = store_png(&mut img, &Path::new("test/store.png"));
+        let res = store_png(&mut img, &path::Path::new("test/store.png"));
         assert!(res.is_ok());
     }
 }

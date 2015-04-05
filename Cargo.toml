@@ -4,10 +4,10 @@ name = "png"
 version = "0.1.0"
 authors = ["The Servo Project Developers"]
 
-links = "png-sys"
+links = "png_sys"
 build = "build.rs"
 
-[dependencies.png-sys]
+[dependencies.png_sys]
 path = "png-sys"
 
 [build-dependencies.gcc]
